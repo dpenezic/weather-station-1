@@ -1,6 +1,6 @@
 #!/usr/bin/python
 import os, fcntl
-credentials_file = os.path.join(os.path.dirname(__file__), "credentials.oracle")
+credentials_file = os.path.join(os.path.dirname(__file__), "credentials.initialstate")
 if os.path.isfile(credentials_file):
     lock_file = "/var/lock/oracle.lock"
     f = open(lock_file, 'w')
