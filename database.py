@@ -1,5 +1,5 @@
 #!/usr/bin/python
-import MySQLdb, datetime, httplib, json, os
+import MySQLdb, datetime, httplib, json, os, time
 # requires MySQLdb python 2 library which is not ported to python 3 yet
 class mysql_database:
     def __init__(self):
@@ -29,13 +29,13 @@ class mysql_database:
     def __del__(self):
         self.connection.close()
 
-class oracle_apex_database:
-    def __init__(self, path, host = "apex.oracle.com"):
+class is_database:
+    def __init__(self, path, host = "groker.initialstate.com"):
         self.host = host
         self.path = path
         self.conn = httplib.HTTPSConnection(self.host)
         self.credentials = None
-        credentials_file = os.path.join(os.path.dirname(__file__), "credentials.oracle")
+        credentials_file = os.path.join(os.path.dirname(__file__), "credentials.initialstate")
         
         if os.path.isfile(credentials_file):
             f = open(credentials_file, "r")
@@ -46,48 +46,63 @@ class oracle_apex_database:
         else:
             print("Credentials file not found")
 
-        self.default_data = { "Content-type": "text/plain", "Accept": "text/plain" }
+        self.default_data = { "Content-type": "application/json", "Accept-Version": "~0" }
 
     def upload(self, id, ambient_temperature, ground_temperature, air_quality, air_pressure, humidity, wind_direction, wind_speed, wind_gust_speed, rainfall, created):
-        #keys must follow the names expected by the Orcale Apex REST service
-        oracle_data = {
-	    "LOCAL_ID": str(id),
-	    "AMB_TEMP": str(ambient_temperature),
-	    "GND_TEMP": str(ground_temperature),
-	    "AIR_QUALITY": str(air_quality),
-	    "AIR_PRESSURE": str(air_pressure),
-	    "HUMIDITY": str(humidity),
-	    "WIND_DIRECTION": str(wind_direction),
-	    "WIND_SPEED": str(wind_speed),
-	    "WIND_GUST_SPEED": str(wind_gust_speed),
-	    "RAINFALL": str(rainfall),
-	    "READING_TIMESTAMP": str(created) }
+        is_data = [{
+	    "key": "Air Temp",
+        "value": str(ambient_temperature),
+        "epoch": str(created)},
+        {"key": "Soil Temp",
+        "value": str(ground_temperature),
+        "epoch": str(created)},
+	    {"key": "Air Quality",
+        "value": str(air_quality),
+        "epoch": str(created)},
+	    {"key": "Pressure",
+        "value": str(air_pressure),
+        "epoch": str(created)},
+	    {"key": "Humidity",
+        "value": str(humidity),
+        "epoch": str(created)},
+        {"key": "Wind Avg",
+        "value": str(wind_direction),
+        "epoch": str(created)},
+        {"key": "Wind Speed",
+        "value": str(wind_speed),
+        "epoch": str(created)},
+        {"key": "Wind Gust",
+        "value": str(wind_gust_speed),
+        "epoch": str(created)},
+        {"key": "Rain",
+        "value": str(rainfall),
+        "epoch": str(created)}]
 
-        for key in oracle_data.keys():
-            if oracle_data[key] == str(None):
-                del oracle_data[key]
+        for item in data:
+            if item["value"] == "None":
+                data.remove(item)
 
-        return self.https_post(oracle_data)
+        return self.https_post(is_data)
 
     def https_post(self, data, attempts = 3):
         attempt = 0
-        headers = dict(self.default_data.items() + self.credentials.items() + data.items())
+        headers = dict(self.default_data.items() + self.credentials.items())
         success = False
         response_data = None
 
         while not success and attempt < attempts:
             try:
-                self.conn.request("POST", self.path, None, headers)
+                self.conn.request("POST", self.path, json.dumps(data), headers)
                 response = self.conn.getresponse()
                 response_data = response.read()
                 print("Response status: %s, Response reason: %s, Response data: %s" % (response.status, response.reason, response_data))
-                success = response.status == 200 or response.status == 201
+                success = response.status == 200 or response.status == 204
             except Exception as e:
                 print("Unexpected error", e)
             finally:
                 attempt += 1
 
-        return response_data if success else None
+        return response.reason if success else None
 
     def __del__(self):
         self.conn.close()
@@ -109,7 +124,7 @@ class weather_database:
     def is_none(self, val):
         return val if val != None else "NULL"
 
-    def insert(self, ambient_temperature, ground_temperature, air_quality, air_pressure, humidity, wind_direction, wind_speed, wind_gust_speed, rainfall, created = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")):
+    def insert(self, ambient_temperature, ground_temperature, air_quality, air_pressure, humidity, wind_direction, wind_speed, wind_gust_speed, rainfall, created = time.time()):
         params = ( ambient_temperature,
             ground_temperature,
             air_quality,
@@ -129,13 +144,18 @@ class weather_database:
         rows_count = len(results)
         if rows_count > 0:
             print("%d rows to send..." % rows_count)
-            odb = oracle_apex_database(path = "/pls/apex/raspberrypi/weatherstation/submitmeasurement")
+            if rows_count > 10:
+                wait_time = 3
+            else:
+                wait_time = 1
 
-            if odb.credentials == None:
+            isdb = is_database(path = "https://groker.initialstate.com/api/events")
+
+            if isdb.credentials == None:
                 return #cannot upload
 
             for row in results:
-                response_data = odb.upload(
+                response_data = isdb.upload(
                     row["ID"], 
                     row["AMBIENT_TEMPERATURE"], 
                     row["GROUND_TEMPERATURE"],
@@ -146,16 +166,17 @@ class weather_database:
                     row["WIND_SPEED"], 
                     row["WIND_GUST_SPEED"], 
                     row["RAINFALL"], 
-                    row["CREATED"].strftime("%Y-%m-%dT%H:%M:%S"))
+                    row["CREATED"]
+                    )
 
-                if response_data != None and response_data != "-1":
-                    json_dict = json.loads(response_data)
-                    oracle_id = json_dict["ORCL_RECORD_ID"]
-                    if self.is_number(oracle_id):
+                if response_data == "No Content":                  
+                    is_id = str(row["ID"])
+                    if self.is_number(is_id):
                         local_id = str(row["ID"])
-                        self.db.execute(self.update_template, (oracle_id, local_id))
-                        print("ID: %s updated with REMOTE_ID = %s" % (local_id, oracle_id))
+                        self.db.execute(self.update_template, (is_id, local_id))
+                        print("ID: %s updated with REMOTE_ID = %s" % (local_id, is_id))
                 else:
-                    print("Bad response from Oracle")
+                    print("Bad response from Initial State")
+            time.sleep(wait_time)
         else:
             print("Nothing to upload")
